@@ -1,23 +1,57 @@
 =================
 Flask-MongoEngine
 =================
-.. image:: https://secure.travis-ci.org/MongoEngine/flask-mongoengine.png?branch=master
-  :target: http://travis-ci.org/MongoEngine/flask-mongoengine
+:Info: MongoEngine for Flask web applications.
+:Repository: https://github.com/MongoEngine/flask-mongoengine
 
-:Info: Flask extension to help with MongoEngine
-:Author: Ross Lawley (http://github.com/rozza)
+.. image:: https://travis-ci.org/MongoEngine/flask-mongoengine.svg?branch=master
+  :target: https://travis-ci.org/MongoEngine/flask-mongoengine
 
-A Flask extension that provides integration with `MongoEngine <http://mongoengine.org/>`_. It handles connection management for your app.
+.. image:: https://coveralls.io/repos/github/MongoEngine/flask-mongoengine/badge.svg?branch=master
+  :target: https://coveralls.io/github/MongoEngine/flask-mongoengine?branch=master
 
-You can also use `WTForms <http://wtforms.simplecodes.com/>`_ as model forms for your models.
+About
+=====
+Flask-MongoEngine is a Flask extension that provides integration with MongoEngine. It handles connection management for your app.
+You can also use WTForms as model forms for your models.
 
-Full documentation: `Read The Docs <http://readthedocs.org/docs/flask-mongoengine/en/latest/>`_
+Documentation
+=============
+You can find the documentation at https://flask-mongoengine.readthedocs.io
 
-For a demo run - simply setup a virtualenv:
+Installation
+============
+You can install this package using pypi: ``pip install flask-mongoengine``
 
-    pip install -r requirements.txt
+Tests
+=====
+To run the test suite, ensure you are running a local copy of Flask-MongoEngine
+and run: ``python setup.py nosetests``.
 
-    python example/simpleapp.py
+To run the test suite on every supported versions of Python, PyPy and MongoEngine you can use ``tox``.
+Ensure tox and each supported Python, PyPy versions are installed in your environment:
 
+.. code-block:: shell
 
-And goto http://localhost:4000
+    # Install tox
+    $ pip install tox
+    # Run the test suites
+    $ tox
+
+To run a single or selected test suits, use the nosetest convention. E.g.
+
+.. code-block:: shell
+
+    $ python setup.py nosetests --tests tests/example_test.py:ExampleTestClass.example_test_method
+
+Contributing
+============
+We welcome contributions! see  the `Contribution guidelines <https://github.com/MongoEngine/flask-mongoengine/blob/master/CONTRIBUTING.rst>`_
+
+Community
+=========
+- `#flask-mongoengine IRC channel <http://webchat.freenode.net/?channels=flask-mongoengine>`_
+
+License
+=======
+Flask-MongoEngine is distributed under MIT license, see LICENSE for more details.

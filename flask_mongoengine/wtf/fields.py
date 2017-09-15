@@ -1,20 +1,22 @@
 """
 Useful form fields for use with the mongoengine.
 """
-from gettext import gettext as _
 import json
+import sys
 
-from wtforms import widgets
-from wtforms.fields import SelectFieldBase, TextAreaField, Field
-from wtforms.validators import ValidationError
-
+from gettext import gettext as _
 from mongoengine.queryset import DoesNotExist
-
 import six
+from wtforms import widgets
+from wtforms.fields import SelectFieldBase, StringField, TextAreaField
+from wtforms.validators import ValidationError
 
 __all__ = (
     'ModelSelectField', 'QuerySetSelectField',
 )
+
+if sys.version_info >= (3, 0):
+    unicode = str
 
 
 class QuerySetSelectField(SelectFieldBase):
@@ -35,8 +37,10 @@ class QuerySetSelectField(SelectFieldBase):
     """
     widget = widgets.Select()
 
-    def __init__(self, label=u'', validators=None, queryset=None, label_attr='',
-                 allow_blank=False, blank_text=u'---', **kwargs):
+    def __init__(self, label=u'', validators=None, queryset=None,
+                 label_attr='', allow_blank=False, blank_text=u'---',
+                 **kwargs):
+
         super(QuerySetSelectField, self).__init__(label, validators, **kwargs)
         self.label_attr = label_attr
         self.allow_blank = allow_blank
@@ -47,26 +51,29 @@ class QuerySetSelectField(SelectFieldBase):
         if self.allow_blank:
             yield (u'__None', self.blank_text, self.data is None)
 
-        if self.queryset == None:
+        if self.queryset is None:
             return
 
         self.queryset.rewind()
         for obj in self.queryset:
             label = self.label_attr and getattr(obj, self.label_attr) or obj
-            yield (obj.id, label, obj == self.data)
+            if isinstance(self.data, list):
+                selected = obj in self.data
+            else:
+                selected = self._is_selected(obj)
+            yield (obj.id, label, selected)
 
     def process_formdata(self, valuelist):
         if valuelist:
             if valuelist[0] == '__None':
                 self.data = None
             else:
-                if self.queryset == None:
+                if self.queryset is None:
                     self.data = None
                     return
 
                 try:
-                    # clone() because of https://github.com/MongoEngine/mongoengine/issues/56
-                    obj = self.queryset.clone().get(id=valuelist[0])
+                    obj = self.queryset.get(pk=valuelist[0])
                     self.data = obj
                 except DoesNotExist:
                     self.data = None
@@ -76,16 +83,24 @@ class QuerySetSelectField(SelectFieldBase):
             if not self.data:
                 raise ValidationError(_(u'Not a valid choice'))
 
+    def _is_selected(self, item):
+        return item == self.data
+
 
 class QuerySetSelectMultipleField(QuerySetSelectField):
 
     widget = widgets.Select(multiple=True)
 
-    def  __init__(self, label=u'', validators=None, queryset=None, label_attr='',
-                  allow_blank=False, blank_text=u'---', **kwargs):
-        super(QuerySetSelectMultipleField, self).__init__(label, validators, queryset, label_attr, allow_blank, blank_text, **kwargs)
+    def __init__(self, label=u'', validators=None, queryset=None,
+                 label_attr='', allow_blank=False, blank_text=u'---',
+                 **kwargs):
+
+        super(QuerySetSelectMultipleField, self).__init__(
+            label, validators, queryset, label_attr, allow_blank, blank_text,
+            **kwargs)
 
     def process_formdata(self, valuelist):
+
         if valuelist:
             if valuelist[0] == '__None':
                 self.data = None
@@ -95,9 +110,16 @@ class QuerySetSelectMultipleField(QuerySetSelectField):
                     return
 
                 self.queryset.rewind()
-                self.data = [obj for obj in self.queryset if str(obj.id) in valuelist]
+                self.data = list(self.queryset(pk__in=valuelist))
                 if not len(self.data):
                     self.data = None
+
+        # If no value passed, empty the list
+        else:
+            self.data = None
+
+    def _is_selected(self, item):
+        return item in self.data if self.data else False
 
 
 class ModelSelectField(QuerySetSelectField):
@@ -117,7 +139,6 @@ class ModelSelectMultipleField(QuerySetSelectMultipleField):
     def __init__(self, label=u'', validators=None, model=None, **kwargs):
         queryset = kwargs.pop('queryset', model.objects)
         super(ModelSelectMultipleField, self).__init__(label, validators, queryset=queryset, **kwargs)
-
 
 
 class JSONField(TextAreaField):
@@ -142,20 +163,24 @@ class DictField(JSONField):
             raise ValueError(self.gettext(u'Not a valid dictionary.'))
 
 
-# MongoEngine validates '' as an invalid email. Therefore the standard StringField which returns '' if it is passed None won't work.
-class NoneStringField(Field):
+class NoneStringField(StringField):
     """
-    This field is the base for most of the more complicated fields, and
-    represents an ``<input type="text">``.
+    Custom StringField that counts "" as None
     """
-    widget = widgets.TextInput()
-
     def process_formdata(self, valuelist):
         if valuelist:
             self.data = valuelist[0]
-        else:
+        if self.data == "":
             self.data = None
 
-    def _value(self):
-        return six.text_type(self.data) if self.data else None
 
+class BinaryField(TextAreaField):
+    """
+    Custom TextAreaField that converts its value with binary_type.
+    """
+    def process_formdata(self, valuelist):
+        if valuelist:
+            if six.PY3:
+                self.data = six.binary_type(valuelist[0], 'utf-8')
+            else:
+                self.data = six.binary_type(valuelist[0])

@@ -1,90 +1,192 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
+import inspect
 
-import math
-
+from flask import Flask, abort, current_app
 import mongoengine
+from mongoengine.base.fields import BaseField
+from mongoengine.errors import ValidationError
+from mongoengine.queryset import (DoesNotExist, MultipleObjectsReturned,
+                                  QuerySet)
 
-from mongoengine.queryset import MultipleObjectsReturned, DoesNotExist, QuerySet
-from mongoengine.base import ValidationError
+from .connection import *
+from .json import override_json_encoder
+from .pagination import *
+from .sessions import *
+from .wtf import WtfBaseField
 
-from flask import abort
+
+VERSION = (0, 9, 3)
+
+
+def get_version():
+    """Return the VERSION as a string, e.g. for VERSION == (0, 9, 2),
+    return '0.9.2'.
+    """
+    return '.'.join(map(str, VERSION))
+
+
+__version__ = get_version()
+
+
+def _patch_base_field(obj, name):
+    """
+    If the object submitted has a class whose base class is
+    mongoengine.base.fields.BaseField, then monkey patch to
+    replace it with flask_mongoengine.wtf.WtfBaseField.
+
+    @note:  WtfBaseField is an instance of BaseField - but
+            gives us the flexibility to extend field parameters
+            and settings required of WTForm via model form generator.
+
+    @see: flask_mongoengine.wtf.base.WtfBaseField.
+    @see: model_form in flask_mongoengine.wtf.orm
+
+    @param obj: MongoEngine instance in which we should locate the class.
+    @param name: Name of an attribute which may or may not be a BaseField.
+    """
+    # TODO is there a less hacky way to accomplish the same level of
+    # extensibility/control?
+
+    # get an attribute of the MongoEngine class and return if it's not
+    # a class
+    cls = getattr(obj, name)
+    if not inspect.isclass(cls):
+        return
+
+    # if it is a class, inspect all of its parent classes
+    cls_bases = list(cls.__bases__)
+
+    # if any of them is a BaseField, replace it with WtfBaseField
+    for index, base in enumerate(cls_bases):
+        if base == BaseField:
+            cls_bases[index] = WtfBaseField
+            cls.__bases__ = tuple(cls_bases)
+            break
+
+    # re-assign the class back to the MongoEngine instance
+    delattr(obj, name)
+    setattr(obj, name, cls)
+
 
 def _include_mongoengine(obj):
-    for module in mongoengine, mongoengine.fields:
-        for key in module.__all__:
-            if not hasattr(obj, key):
-                setattr(obj, key, getattr(module, key))
+    """
+    Copy all of the attributes from mongoengine and mongoengine.fields
+    onto obj (which should be an instance of the MongoEngine class).
+    """
+    # TODO why do we need this? What's wrong with importing from the
+    # original modules?
+    for module in (mongoengine, mongoengine.fields):
+        for attr_name in module.__all__:
+            if not hasattr(obj, attr_name):
+                setattr(obj, attr_name, getattr(module, attr_name))
+
+                # patch BaseField if available
+                _patch_base_field(obj, attr_name)
+
+
+def current_mongoengine_instance():
+    """Return a MongoEngine instance associated with current Flask app."""
+    me = current_app.extensions.get('mongoengine', {})
+    for k, v in me.items():
+        if isinstance(k, MongoEngine):
+            return k
 
 
 class MongoEngine(object):
+    """Main class used for initialization of Flask-MongoEngine."""
 
-    def __init__(self, app=None):
-
+    def __init__(self, app=None, config=None):
         _include_mongoengine(self)
 
+        self.app = None
         self.Document = Document
         self.DynamicDocument = DynamicDocument
 
         if app is not None:
-            self.init_app(app)
+            self.init_app(app, config)
 
-    def init_app(self, app):
+    def init_app(self, app, config=None):
+        if not app or not isinstance(app, Flask):
+            raise Exception('Invalid Flask application instance')
 
-        conn_settings = app.config.get('MONGODB_SETTINGS', None)
-
-        if not conn_settings:
-            conn_settings = {
-                'db': app.config.get('MONGODB_DB', None),
-                'username': app.config.get('MONGODB_USERNAME', None),
-                'password': app.config.get('MONGODB_PASSWORD', None),
-                'host': app.config.get('MONGODB_HOST', None),
-                'port': int(app.config.get('MONGODB_PORT', 0)) or None
-            }
-
-        conn_settings = dict([(k.lower(), v) for k, v in conn_settings.items() if v])
-
-        if 'replicaset' in conn_settings:
-            conn_settings['replicaSet'] = conn_settings['replicaset']
-            del conn_settings['replicaset']
-
-        self.connection = mongoengine.connect(**conn_settings)
+        self.app = app
 
         app.extensions = getattr(app, 'extensions', {})
-        app.extensions['mongoengine'] = self
-        self.app = app
+
+        # Make documents JSON serializable
+        override_json_encoder(app)
+
+        if 'mongoengine' not in app.extensions:
+            app.extensions['mongoengine'] = {}
+
+        if self in app.extensions['mongoengine']:
+            # Raise an exception if extension already initialized as
+            # potentially new configuration would not be loaded.
+            raise Exception('Extension already initialized')
+
+        if not config:
+            # If not passed a config then we read the connection settings
+            # from the app config.
+            config = app.config
+
+        # Obtain db connection(s)
+        connections = create_connections(config)
+
+        # Store objects in application instance so that multiple apps do not
+        # end up accessing the same objects.
+        s = {'app': app, 'conn': connections}
+        app.extensions['mongoengine'][self] = s
+
+    @property
+    def connection(self):
+        """
+        Return MongoDB connection(s) associated with this MongoEngine
+        instance.
+        """
+        return current_app.extensions['mongoengine'][self]['conn']
 
 
 class BaseQuerySet(QuerySet):
-    """
-    A base queryset with handy extras
-    """
+    """Mongoengine's queryset extended with handy extras."""
 
     def get_or_404(self, *args, **kwargs):
+        """
+        Get a document and raise a 404 Not Found error if it doesn't
+        exist.
+        """
         try:
             return self.get(*args, **kwargs)
         except (MultipleObjectsReturned, DoesNotExist, ValidationError):
+            # TODO probably only DoesNotExist should raise a 404
             abort(404)
 
     def first_or_404(self):
-
+        """Same as get_or_404, but uses .first, not .get."""
         obj = self.first()
         if obj is None:
             abort(404)
 
         return obj
 
-    def paginate(self, page, per_page, error_out=True):
-
+    def paginate(self, page, per_page, **kwargs):
+        """
+        Paginate the QuerySet with a certain number of docs per page
+        and return docs for a given page.
+        """
         return Pagination(self, page, per_page)
 
-    def paginate_field(self, field_name, doc_id, page, per_page,
-            total=None):
+    def paginate_field(self, field_name, doc_id, page, per_page, total=None):
+        """
+        Paginate items within a list field from one document in the
+        QuerySet.
+        """
+        # TODO this doesn't sound useful at all - remove in next release?
         item = self.get(id=doc_id)
         count = getattr(item, field_name + "_count", '')
         total = total or count or len(getattr(item, field_name))
-        return ListFieldPagination(self, field_name, doc_id, page, per_page,
-            total=total)
+        return ListFieldPagination(self, doc_id, field_name, page, per_page,
+                                   total=total)
 
 
 class Document(mongoengine.Document):
@@ -93,166 +195,17 @@ class Document(mongoengine.Document):
     meta = {'abstract': True,
             'queryset_class': BaseQuerySet}
 
+    def paginate_field(self, field_name, page, per_page, total=None):
+        """Paginate items within a list field."""
+        # TODO this doesn't sound useful at all - remove in next release?
+        count = getattr(self, field_name + "_count", '')
+        total = total or count or len(getattr(self, field_name))
+        return ListFieldPagination(self.__class__.objects, self.pk, field_name,
+                                   page, per_page, total=total)
+
 
 class DynamicDocument(mongoengine.DynamicDocument):
     """Abstract Dynamic document with extra helpers in the queryset class"""
 
     meta = {'abstract': True,
             'queryset_class': BaseQuerySet}
-
-    test = 1
-
-
-class Pagination(object):
-
-    def __init__(self, iterable, page, per_page):
-
-        if page < 1:
-            abort(404)
-
-        self.iterable = iterable
-        self.page = page
-        self.per_page = per_page
-        self.total = len(iterable)
-
-        start_index = (page - 1) * per_page
-        end_index = page * per_page
-
-        self.items = iterable[start_index:end_index]
-        if isinstance(self.items, QuerySet):
-            self.items = self.items.select_related()
-        if not self.items and page != 1:
-            abort(404)
-
-    @property
-    def pages(self):
-        """The total number of pages"""
-        return int(math.ceil(self.total / float(self.per_page)))
-
-    def prev(self, error_out=False):
-        """Returns a :class:`Pagination` object for the previous page."""
-        assert self.iterable is not None, 'an object is required ' \
-                                       'for this method to work'
-        iterable = self.iterable
-        if isinstance(iterable, QuerySet):
-            iterable._skip = None
-            iterable._limit = None
-            iterable = iterable.clone()
-        return self.__class__(iterable, self.page - 1, self.per_page)
-
-    @property
-    def prev_num(self):
-        """Number of the previous page."""
-        return self.page - 1
-
-    @property
-    def has_prev(self):
-        """True if a previous page exists"""
-        return self.page > 1
-
-    def next(self, error_out=False):
-        """Returns a :class:`Pagination` object for the next page."""
-        assert self.iterable is not None, 'an object is required ' \
-                                       'for this method to work'
-        iterable = self.iterable
-        if isinstance(iterable, QuerySet):
-            iterable._skip = None
-            iterable._limit = None
-            iterable = iterable.clone()
-        return self.__class__(iterable, self.page + 1, self.per_page)
-
-    @property
-    def has_next(self):
-        """True if a next page exists."""
-        return self.page < self.pages
-
-    @property
-    def next_num(self):
-        """Number of the next page"""
-        return self.page + 1
-
-    def iter_pages(self, left_edge=2, left_current=2,
-                   right_current=5, right_edge=2):
-        """Iterates over the page numbers in the pagination.  The four
-        parameters control the thresholds how many numbers should be produced
-        from the sides.  Skipped page numbers are represented as `None`.
-        This is how you could render such a pagination in the templates:
-
-        .. sourcecode:: html+jinja
-
-            {% macro render_pagination(pagination, endpoint) %}
-              <div class=pagination>
-              {%- for page in pagination.iter_pages() %}
-                {% if page %}
-                  {% if page != pagination.page %}
-                    <a href="{{ url_for(endpoint, page=page) }}">{{ page }}</a>
-                  {% else %}
-                    <strong>{{ page }}</strong>
-                  {% endif %}
-                {% else %}
-                  <span class=ellipsis>…</span>
-                {% endif %}
-              {%- endfor %}
-              </div>
-            {% endmacro %}
-        """
-        last = 0
-        for num in xrange(1, self.pages + 1):
-            if num <= left_edge or \
-               (num > self.page - left_current - 1 and
-                num < self.page + right_current) or \
-               num > self.pages - right_edge:
-                if last + 1 != num:
-                    yield None
-                yield num
-                last = num
-
-
-class ListFieldPagination(Pagination):
-
-    def __init__(self, queryset, field_name, doc_id, page, per_page,
-                 total=None):
-        """Allows an array within a document to be paginated.
-
-        Queryset must contain the document which has the array we're
-        paginating, and doc_id should be it's _id.
-        Field name is the name of the array we're paginating.
-        Page and per_page work just like in Pagination.
-        Total is an argument because it can be computed more efficiently
-        elsewhere, but we still use array.length as a fallback.
-        """
-        if page < 1:
-            abort(404)
-
-        self.page = page
-        self.per_page = per_page
-
-        self.queryset = queryset
-        self.doc_id = doc_id
-        self.field_name = field_name
-
-        start_index = (page - 1) * per_page
-
-        field_attrs = {field_name: {"$slice": [start_index, per_page]}}
-
-        self.items = getattr(queryset().fields(**field_attrs
-            ).first(), field_name)
-
-        self.total = total or len(self.items)
-
-        if not self.items and page != 1:
-            abort(404)
-
-    def prev(self, error_out=False):
-        """Returns a :class:`Pagination` object for the previous page."""
-        assert self.items is not None, 'a query object is required ' \
-                                       'for this method to work'
-        return self.__class__(self.queryset, self.doc_id, self.field_name,
-            self.page - 1, self.per_page, self.total)
-
-    def next(self, error_out=False):
-        """Returns a :class:`Pagination` object for the next page."""
-        assert self.iterable is not None, 'a query object is required ' \
-                                       'for this method to work'
-        return self.__class__(self.queryset, self.doc_id, self.field_name,
-            self.page + 1, self.per_page, self.total)
